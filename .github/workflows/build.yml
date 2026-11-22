@@ -158,7 +158,7 @@ jobs:
           name: Release ${{ env.APP_VERSION }}
           files: dist/ip-batch-track-gui-windows-amd64-${{ env.APP_VERSION }}.zip
           body: |
-            ### 发布说明 (${{ env.APP_VERSION }})
+            ### 发布说明
             - 必须鼠标右键exe以管理员身份运行
             - 支持并发路由追踪与延迟测试，结果自动写入同级目录 `Result.txt`
             - 支持自动提取多行/混排输入中的 IP、域名与端口
