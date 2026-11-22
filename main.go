@@ -264,4 +264,284 @@ func main() {
 			adjustingConc = true
 			concEntry.SetText("1")
 			adjustingConc = false
+		} else if v > maxConcurrency {
+			v = maxConcurrency
+			adjustingConc = true
+			concEntry.SetText(strconv.Itoa(maxConcurrency))
+			adjustingConc = false
 		}
+		prefs.SetInt(prefKeyConcurrency, v)
+	}
+
+	ctrlHeight := concEntry.MinSize().Height
+	concInputWrap := container.New(&compactBoxLayout{width: 58, height: ctrlHeight}, concEntry)
+	concLabel := container.NewCenter(widget.NewLabel("并发:"))
+	concBox := container.NewHBox(concLabel, concInputWrap)
+
+	enablePingCheck := widget.NewCheck("启用延迟测试", nil)
+	statusLabel := widget.NewLabel("就绪")
+
+	// 3. 執行日誌區
+	logHint := widget.NewLabel("运行日志：")
+	var (
+		logMu      sync.Mutex
+		logBuf     strings.Builder
+		cancel     context.CancelFunc
+		running    bool
+		updatingDB bool
+	)
+
+	logEntry := widget.NewMultiLineEntry()
+	logEntry.Wrapping = fyne.TextWrapWord
+
+	appendLog := func(line string) {
+		ts := time.Now().Format("15:04:05")
+		msg := fmt.Sprintf("[%s] %s\n", ts, line)
+		fyne.Do(func() {
+			logMu.Lock()
+			logBuf.WriteString(msg)
+			current := logBuf.String()
+			logMu.Unlock()
+			logEntry.SetText(current)
+			logEntry.CursorRow = len(strings.Split(current, "\n")) - 1
+		})
+	}
+
+	clearLogBtn := widget.NewButton("清空日志", func() {
+		logMu.Lock()
+		logBuf.Reset()
+		logMu.Unlock()
+		logEntry.SetText("")
+	})
+
+	clearTargetBtn := widget.NewButton("清空目标", func() {
+		targetEntry.SetText("")
+		fyne.Do(func() { statusLabel.SetText("已清空目标") })
+	})
+
+	var updateDBBtn, startBtn, stopBtn, themeBtn *widget.Button
+
+	setBusy := func(busy bool, statusText string) {
+		running = busy
+		fyne.Do(func() {
+			statusLabel.SetText(statusText)
+			if busy {
+				startBtn.Disable()
+				updateDBBtn.Disable()
+				clearTargetBtn.Disable()
+				stopBtn.Enable()
+			} else {
+				startBtn.Enable()
+				if !updatingDB {
+					updateDBBtn.Enable()
+				}
+				clearTargetBtn.Enable()
+				stopBtn.Disable()
+			}
+		})
+	}
+
+	runPrefixUpdate := func(auto bool) {
+		logMu.Lock()
+		if updatingDB {
+			logMu.Unlock()
+			if !auto {
+				appendLog("[!] 前缀表正在更新中，请稍候...")
+			}
+			return
+		}
+		updatingDB = true
+		logMu.Unlock()
+
+		fyne.Do(func() {
+			updateDBBtn.Disable()
+			if !running {
+				statusLabel.SetText("更新前缀表中...")
+			}
+		})
+
+		if auto {
+			appendLog("[+] 启动自动更新前缀表 (asn_prefixes_v4 + asn_prefixes_v6)...")
+		} else {
+			appendLog("[+] 正在后台更新前缀表 (asn_prefixes_v4 + asn_prefixes_v6)，请稍候...")
+		}
+
+		go func() {
+			defer func() {
+				logMu.Lock()
+				updatingDB = false
+				logMu.Unlock()
+				fyne.Do(func() {
+					if !running {
+						updateDBBtn.Enable()
+						statusLabel.SetText("就绪")
+					}
+				})
+			}()
+
+			if err := filter.UpdatePrefixDB(); err != nil {
+				if auto {
+					appendLog(fmt.Sprintf("[-] 启动自动更新前缀表失败（可稍后手动点击更新）: %v", err))
+				} else {
+					appendLog(fmt.Sprintf("[-] 前缀表更新失败: %v", err))
+					fyne.Do(func() { dialog.ShowError(err, w) })
+				}
+				return
+			}
+
+			appendLog("[+] 前缀表 (asn_prefixes_v4 + asn_prefixes_v6) 更新完成")
+		}()
+	}
+
+	updateDBBtn = widget.NewButton("更新前缀表 (IPv4+IPv6)", func() {
+		if running {
+			return
+		}
+		runPrefixUpdate(false)
+	})
+
+	stopBtn = widget.NewButton("终止测试", func() {
+		if cancel != nil {
+			cancel()
+			appendLog("[!] 用户请求终止测试，正在清理任务...")
+			fyne.Do(func() { statusLabel.SetText("正在终止...") })
+		}
+	})
+	stopBtn.Disable()
+
+	startBtn = widget.NewButton("开始测试", func() {
+		if running {
+			return
+		}
+		conc, err := strconv.Atoi(strings.TrimSpace(concEntry.Text))
+		if err != nil || conc <= 0 || conc > maxConcurrency {
+			dialog.ShowError(fmt.Errorf("并发数必须是 1 到 %d 之间的整数", maxConcurrency), w)
+			return
+		}
+		prefs.SetInt(prefKeyConcurrency, conc)
+
+		targets := extractTargetsFromInput(targetEntry.Text)
+		if len(targets) == 0 {
+			dialog.ShowInformation("提示", "请先在上方输入至少一个有效的 IP 或域名。", w)
+			return
+		}
+
+		enablePing := enablePingCheck.Checked
+		runCtx, runCancel := context.WithCancel(context.Background())
+		cancel = runCancel
+
+		setBusy(true, "测试中...")
+		appendLog(fmt.Sprintf("[+] 已提取并加载 %d 个目标，并发数: %d，启用延迟测试: %v", len(targets), conc, enablePing))
+
+		go func() {
+			defer func() {
+				cancel = nil
+				setBusy(false, "就绪")
+			}()
+
+			if _, err := os.Stat(config.DBV4Path); os.IsNotExist(err) {
+				appendLog("[+] 未找到本地前缀表，正在自动拉取...")
+				if err := filter.UpdatePrefixDB(); err != nil {
+					appendLog(fmt.Sprintf("[-] 前缀表拉取失败: %v", err))
+					return
+				}
+				appendLog("[+] 前缀表拉取完成")
+			}
+
+			matcher, err := filter.LoadMatcher()
+			if err != nil {
+				appendLog(fmt.Sprintf("[-] 加载前缀匹配器失败: %v", err))
+				return
+			}
+
+			cfg := config.Config{
+				Concurrency: conc,
+				Timeout:     60 * time.Second,
+				MaxHops:     30,
+				EnablePing:  enablePing,
+			}
+
+			for _, t := range targets {
+				appendLog(fmt.Sprintf("  > 正在探测 %s:%s ...", t.IP, t.Port))
+			}
+
+			tr := tracer.NewTracer(cfg.Timeout, cfg.MaxHops)
+			startTime := time.Now()
+			results := worker.Run(runCtx, targets, tr, matcher, cfg.Concurrency, cfg.EnablePing, func(r worker.Result) {
+				if r.Err != nil {
+					appendLog(fmt.Sprintf("  - %s:%s | 异常: %v", r.IP, r.Port, r.Err))
+				} else {
+					appendLog(fmt.Sprintf("  - %s:%s | 运营商: %s | 线路: %s | ASN: %s | 延迟: %s",
+						r.IP, r.Port, r.ISP, r.LineType, r.ASNStr, r.Delay))
+				}
+			})
+			elapsed := time.Since(startTime).Round(time.Second)
+
+			appendLog(fmt.Sprintf("[+] 测试结束，耗时 %v，共取得 %d 条结果", elapsed, len(results)))
+		}()
+	})
+
+	initialThemeLabel := "🌙 黑夜模式"
+	if isDark {
+		initialThemeLabel = "☀️ 日间模式"
+	}
+
+	themeBtn = widget.NewButton(initialThemeLabel, func() {
+		isDark = !isDark
+		appTheme.dark = isDark
+		a.Settings().SetTheme(appTheme)
+		prefs.SetBool(prefKeyDarkMode, isDark)
+		if isDark {
+			themeBtn.SetText("☀️ 日间模式")
+		} else {
+			themeBtn.SetText("🌙 黑夜模式")
+		}
+		canvas.Refresh(w.Content())
+	})
+
+	// 版面配置：上方目標輸入 + 中間控制欄 + 下方執行日誌
+	controlBar := container.NewHBox(
+		concBox,
+		enablePingCheck,
+		clearLogBtn,
+		updateDBBtn,
+		startBtn,
+		stopBtn,
+		themeBtn,
+		layout.NewSpacer(),
+		statusLabel,
+	)
+
+	topSection := container.NewBorder(
+		container.NewVBox(topHeader, targetHint),
+		nil,
+		nil,
+		nil,
+		targetEntry,
+	)
+
+	logHeader := container.NewHBox(logHint, layout.NewSpacer(), clearTargetBtn)
+	bottomSection := container.NewBorder(
+		logHeader,
+		nil,
+		nil,
+		nil,
+		logEntry,
+	)
+
+	split := container.NewVSplit(topSection, bottomSection)
+	split.SetOffset(0.45)
+
+	mainLayout := container.NewBorder(
+		nil,
+		controlBar,
+		nil,
+		nil,
+		split,
+	)
+
+	w.SetContent(mainLayout)
+	appendLog(fmt.Sprintf("[+] ip路由批量测试 %s 已启动", version))
+	runPrefixUpdate(true)
+	w.ShowAndRun()
+}
