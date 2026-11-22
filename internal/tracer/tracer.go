@@ -103,9 +103,13 @@ func (t *Tracer) detectVersion(ctx context.Context) *ntVersion {
 		if t.exePath == "" {
 			return
 		}
+		exeDir := filepath.Dir(t.exePath)
 		for _, flag := range []string{"--version", "-V", "-v"} {
 			vCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			cmd := exec.CommandContext(vCtx, t.exePath, flag)
+			if exeDir != "" && exeDir != "." {
+				cmd.Dir = exeDir
+			}
 			hideConsoleWindow(cmd)
 			out, err := cmd.CombinedOutput()
 			cancel()
@@ -188,6 +192,9 @@ func (t *Tracer) Trace(ctx context.Context, targetIP, port string) ([]netip.Addr
 
 	args := t.buildArgs(runCtx, ip.String(), dstPort)
 	cmd := exec.Command(t.exePath, args...)
+	if exeDir := filepath.Dir(t.exePath); exeDir != "" && exeDir != "." {
+		cmd.Dir = exeDir
+	}
 	hideConsoleWindow(cmd)
 
 	stdout, err := cmd.StdoutPipe()
@@ -263,7 +270,7 @@ func (t *Tracer) Trace(ctx context.Context, targetIP, port string) ([]netip.Addr
 	if waitErr != nil {
 		return nil, fmt.Errorf("nexttrace 执行异常: %w", waitErr)
 	}
-	return hops, nil
+	return nil, fmt.Errorf("未获取到有效路由跳点")
 }
 
 func isDigits(s string) bool {
