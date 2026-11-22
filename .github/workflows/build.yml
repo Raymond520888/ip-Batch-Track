@@ -60,7 +60,7 @@ jobs:
           done
 
           if [ -z "$GCC_EXE" ]; then
-            GCC_EXE=$(find /c/ProgramData/chocolatey /c/mingw64 /mingw64 -name "x86_64-w64-mingw32-gcc.exe" 2>/dev/null | head -n 1)
+            GCC_EXE=$(find /c/ProgramData/chocolatey /c/mingw64 /mingw64 -name "x86_64-w64-mingw32-gcc.exe" 2>/dev/null | head -n 1 || true)
           fi
 
           if [ -z "$GCC_EXE" ]; then
@@ -74,6 +74,7 @@ jobs:
           which x86_64-w64-mingw32-gcc
           x86_64-w64-mingw32-gcc --version | head -n 1
 
+          echo "[+] 整理并下载 Go 模块..."
           go mod tidy
           go mod download
 
@@ -82,20 +83,28 @@ jobs:
           APP_VERSION="V3.0"
           echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
 
+          echo "[+] 开始编译 ip-batch-track-gui.exe..."
           LDFLAGS="-s -w -H windowsgui -X main.version=${APP_VERSION} -X main.commit=${SHORT_SHA}"
-          go build -ldflags "${LDFLAGS}" -o "dist/package/ip-batch-track-gui.exe" .
+          if ! go build -v -ldflags "${LDFLAGS}" -o "dist/package/ip-batch-track-gui.exe" .; then
+            echo "[-] go build 编译失败，请检查上方编译报错信息"
+            exit 1
+          fi
+          echo "[+] go build 编译成功"
 
           # 查找 Go 模块缓存中的 WinDivert 运行时文件（x64）
           GOMODCACHE_WIN=$(go env GOMODCACHE)
           GOMODCACHE_UNIX=$(cygpath -u "$GOMODCACHE_WIN")
           echo "[+] 正在查找 WinDivert 运行时文件 (缓存目录: $GOMODCACHE_UNIX)..."
 
-          DLL_SRC=$(find "$GOMODCACHE_UNIX" -iname "WinDivert.dll" 2>/dev/null | grep -iE "x64|amd64|64" | head -n 1)
-          if [ -z "$DLL_SRC" ]; then
-            DLL_SRC=$(find "$GOMODCACHE_UNIX" -iname "WinDivert.dll" 2>/dev/null | head -n 1)
+          DLL_SRC=""
+          SYS_SRC=""
+          if [ -d "$GOMODCACHE_UNIX" ]; then
+            DLL_SRC=$(find "$GOMODCACHE_UNIX" -iname "WinDivert.dll" 2>/dev/null | grep -iE "x64|amd64|64" | head -n 1 || true)
+            if [ -z "$DLL_SRC" ]; then
+              DLL_SRC=$(find "$GOMODCACHE_UNIX" -iname "WinDivert.dll" 2>/dev/null | head -n 1 || true)
+            fi
+            SYS_SRC=$(find "$GOMODCACHE_UNIX" -iname "WinDivert64.sys" 2>/dev/null | head -n 1 || true)
           fi
-
-          SYS_SRC=$(find "$GOMODCACHE_UNIX" -iname "WinDivert64.sys" 2>/dev/null | head -n 1)
 
           if [ -n "$DLL_SRC" ]; then
             cp -f "$DLL_SRC" "dist/package/WinDivert.dll"
