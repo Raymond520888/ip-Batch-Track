@@ -158,9 +158,9 @@ jobs:
           name: Release ${{ env.APP_VERSION }}
           files: dist/ip-batch-track-gui-windows-amd64-${{ env.APP_VERSION }}.zip
           body: |
-            ### 更新说明 (${{ env.APP_VERSION }})
+            ### 发布说明 (${{ env.APP_VERSION }})
+            - 必须鼠标右键exe以管理员身份运行
             - 支持并发路由追踪与延迟测试，结果自动写入同级目录 `Result.txt`
-            - 过滤 `AS9808`，命中 `AS58807` (CMIN2) 提前结束分析
             - 支持自动提取多行/混排输入中的 IP、域名与端口
             - 自动记录上次使用的线程数与黑夜/日间主题模式
 
