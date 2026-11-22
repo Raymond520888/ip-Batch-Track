@@ -28,6 +28,10 @@ import (
 const (
 	bannerTopRight = "Make by Raymond"
 	maxConcurrency = 128
+	defaultConc    = 128
+
+	prefKeyConcurrency = "concurrency"
+	prefKeyDarkMode    = "dark_mode"
 )
 
 var (
@@ -111,8 +115,17 @@ func (l *compactBoxLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 }
 
 func main() {
-	a := app.New()
-	isDark := false
+	a := app.NewWithID("ip-batch-track-gui")
+	prefs := a.Preferences()
+
+	savedConc := prefs.IntWithFallback(prefKeyConcurrency, defaultConc)
+	if savedConc <= 0 {
+		savedConc = 1
+	} else if savedConc > maxConcurrency {
+		savedConc = maxConcurrency
+	}
+
+	isDark := prefs.BoolWithFallback(prefKeyDarkMode, false)
 	appTheme := &customTheme{dark: isDark}
 	a.Settings().SetTheme(appTheme)
 
@@ -132,7 +145,7 @@ func main() {
 
 	// 2. 控制欄元件（純數字輸入框 + 居中 + 無上下按鈕 + 無滾動條 + 無勾號 + 上限 128）
 	concEntry := widget.NewEntry()
-	concEntry.SetText("128")
+	concEntry.SetText(strconv.Itoa(savedConc))
 	concEntry.Wrapping = fyne.TextTruncate
 	concEntry.Validator = nil
 
@@ -149,11 +162,18 @@ func main() {
 		if err != nil {
 			return
 		}
-		if v > maxConcurrency {
+		if v < 1 {
+			v = 1
+			adjustingConc = true
+			concEntry.SetText("1")
+			adjustingConc = false
+		} else if v > maxConcurrency {
+			v = maxConcurrency
 			adjustingConc = true
 			concEntry.SetText(strconv.Itoa(maxConcurrency))
 			adjustingConc = false
 		}
+		prefs.SetInt(prefKeyConcurrency, v)
 	}
 
 	ctrlHeight := concEntry.MinSize().Height
@@ -301,6 +321,7 @@ func main() {
 			dialog.ShowError(fmt.Errorf("并发数必须是 1 到 %d 之间的整数", maxConcurrency), w)
 			return
 		}
+		prefs.SetInt(prefKeyConcurrency, conc)
 
 		rawLines := strings.Split(targetEntry.Text, "\n")
 		var targets []worker.Target
@@ -379,16 +400,20 @@ func main() {
 		}()
 	})
 
-	themeBtn = widget.NewButton("🌙 黑夜模式", func() {
+	initialThemeLabel := "🌙 黑夜模式"
+	if isDark {
+		initialThemeLabel = "☀️ 日间模式"
+	}
+
+	themeBtn = widget.NewButton(initialThemeLabel, func() {
 		isDark = !isDark
 		appTheme.dark = isDark
 		a.Settings().SetTheme(appTheme)
+		prefs.SetBool(prefKeyDarkMode, isDark)
 		if isDark {
 			themeBtn.SetText("☀️ 日间模式")
-			appendLog("[+] 已切换至黑夜模式")
 		} else {
 			themeBtn.SetText("🌙 黑夜模式")
-			appendLog("[+] 已切换至日间模式")
 		}
 		canvas.Refresh(w.Content())
 	})
@@ -397,7 +422,7 @@ func main() {
 	controlBar := container.NewHBox(
 		concBox,
 		enablePingCheck,
-		clearTargetBtn,
+		clearLogBtn,
 		updateDBBtn,
 		startBtn,
 		stopBtn,
@@ -414,7 +439,7 @@ func main() {
 		targetEntry,
 	)
 
-	logHeader := container.NewHBox(logHint, layout.NewSpacer(), clearLogBtn)
+	logHeader := container.NewHBox(logHint, layout.NewSpacer(), clearTargetBtn)
 	bottomSection := container.NewBorder(
 		logHeader,
 		nil,
