@@ -137,7 +137,7 @@ func (t *Tracer) buildArgs(ctx context.Context, ipStr string, dstPort int) []str
 		"-d", "disable-geoip",
 		"-n",
 		"-C",
-		"-q", "1",
+		"-q", "2",
 		"-m", strconv.Itoa(t.maxHops),
 		"-p", strconv.Itoa(dstPort),
 		ipStr,
@@ -145,7 +145,6 @@ func (t *Tracer) buildArgs(ctx context.Context, ipStr string, dstPort int) []str
 	return args
 }
 
-// Trace 调用外部 nexttrace 程序，解析 `|` 分隔的原始输出并返回跳点地址列表。
 func (t *Tracer) Trace(ctx context.Context, targetIP, port string) ([]netip.Addr, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
