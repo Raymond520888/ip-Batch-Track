@@ -42,11 +42,23 @@ type Result struct {
 }
 
 func resolveResultFilePath() string {
-	const fileName = "Result.txt"
+	baseDir := "."
 	if exePath, err := os.Executable(); err == nil && strings.TrimSpace(exePath) != "" {
-		return filepath.Join(filepath.Dir(exePath), fileName)
+		baseDir = filepath.Dir(exePath)
 	}
-	return filepath.Join(".", fileName)
+
+	timestamp := time.Now().Format("20060102_150405")
+	candidate := filepath.Join(baseDir, fmt.Sprintf("Result_%s.txt", timestamp))
+	if _, err := os.Stat(candidate); os.IsNotExist(err) {
+		return candidate
+	}
+
+	for idx := 1; ; idx++ {
+		nextPath := filepath.Join(baseDir, fmt.Sprintf("Result_%s_%d.txt", timestamp, idx))
+		if _, err := os.Stat(nextPath); os.IsNotExist(err) {
+			return nextPath
+		}
+	}
 }
 
 func measureTCPDelay(ctx context.Context, ip, port string, timeout time.Duration) (string, bool) {
