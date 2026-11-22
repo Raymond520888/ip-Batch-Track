@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,11 @@ import (
 	"ip-batch-track/internal/tracer"
 )
 
-var pingTimeRegex = regexp.MustCompile(`(?i)(?:时间|時間|time)\s*[=:]\s*[<~]?\s*([\d.]+)\s*ms`)
+var (
+	pingTimeRegex = regexp.MustCompile(`(?i)(?:时间|時間|time)\s*[=:<~]?\s*[<~]?\s*([\d.]+)\s*ms`)
+	pingMsRegex   = regexp.MustCompile(`(?i)([<>~=]?\s*[\d.]+)\s*ms`)
+	pingSem       = make(chan struct{}, 24)
+)
 
 type Target struct {
 	IP      string
@@ -44,21 +49,67 @@ func resolveResultFilePath() string {
 	return filepath.Join(".", fileName)
 }
 
-func measurePingDelay(ctx context.Context, ip string, timeout time.Duration) string {
-	if strings.TrimSpace(ip) == "" {
-		return "N/A"
+func measureTCPDelay(ctx context.Context, ip, port string, timeout time.Duration) (string, bool) {
+	host := strings.TrimSpace(ip)
+	if host == "" {
+		return "N/A", false
+	}
+	p := strings.TrimSpace(port)
+	if p == "" {
+		p = "443"
 	}
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
 
+	addr := net.JoinHostPort(strings.Trim(host, "[]"), p)
+	dialer := &net.Dialer{Timeout: timeout}
+	start := time.Now()
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return "N/A", false
+	}
+	_ = conn.Close()
+
+	ms := int(math.Round(float64(time.Since(start).Microseconds()) / 1000.0))
+	if ms < 1 {
+		ms = 1
+	}
+	return fmt.Sprintf("%dms", ms), true
+}
+
+func measurePingDelay(ctx context.Context, ip, port string, timeout time.Duration) string {
+	targetHost := strings.TrimSpace(ip)
+	if targetHost == "" {
+		return "N/A"
+	}
+	if timeout <= 0 {
+		timeout = 4 * time.Second
+	}
+
+	select {
+	case pingSem <- struct{}{}:
+		defer func() { <-pingSem }()
+	case <-ctx.Done():
+		return "N/A"
+	}
+
+	cleanIP := strings.Trim(targetHost, "[]")
+	parsedIP := net.ParseIP(cleanIP)
+	isIPv6 := parsedIP != nil && parsedIP.To4() == nil
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		timeoutMs := int(timeout.Milliseconds())
-		if timeoutMs < 500 {
-			timeoutMs = 1000
+		if timeoutMs < 1000 {
+			timeoutMs = 1500
 		}
-		cmd = exec.CommandContext(ctx, "ping", "-n", "3", "-w", strconv.Itoa(timeoutMs), ip)
+		args := []string{"-n", "3", "-w", strconv.Itoa(timeoutMs)}
+		if isIPv6 {
+			args = append([]string{"-6"}, args...)
+		}
+		args = append(args, cleanIP)
+		cmd = exec.CommandContext(ctx, "ping", args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			HideWindow:    true,
 			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
@@ -68,41 +119,54 @@ func measurePingDelay(ctx context.Context, ip string, timeout time.Duration) str
 		if sec < 1 {
 			sec = 1
 		}
-		cmd = exec.CommandContext(ctx, "ping", "-c", "3", "-W", strconv.Itoa(sec), ip)
+		args := []string{"-c", "3", "-W", strconv.Itoa(sec)}
+		if isIPv6 {
+			args = append([]string{"-6"}, args...)
+		}
+		args = append(args, cleanIP)
+		cmd = exec.CommandContext(ctx, "ping", args...)
 	}
 
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return "N/A"
 	}
-	if err != nil && len(out) == 0 {
-		return "N/A"
-	}
 
-	matches := pingTimeRegex.FindAllStringSubmatch(string(out), -1)
-	if len(matches) == 0 {
-		return "N/A"
-	}
-
-	var sum float64
-	var count int
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
+	if err == nil || len(out) > 0 {
+		outputStr := string(out)
+		matches := pingTimeRegex.FindAllStringSubmatch(outputStr, -1)
+		if len(matches) == 0 {
+			matches = pingMsRegex.FindAllStringSubmatch(outputStr, -1)
 		}
-		val, parseErr := strconv.ParseFloat(m[1], 64)
-		if parseErr != nil {
-			continue
+
+		var sum float64
+		var count int
+		for _, m := range matches {
+			if len(m) < 2 {
+				continue
+			}
+			numStr := strings.TrimSpace(strings.TrimLeft(m[1], "<>~="))
+			val, parseErr := strconv.ParseFloat(numStr, 64)
+			if parseErr != nil {
+				continue
+			}
+			sum += val
+			count++
 		}
-		sum += val
-		count++
-	}
-	if count == 0 {
-		return "N/A"
+		if count > 0 {
+			avg := int(math.Round(sum / float64(count)))
+			if avg < 1 {
+				avg = 1
+			}
+			return fmt.Sprintf("%dms", avg)
+		}
 	}
 
-	avg := int(math.Round(sum / float64(count)))
-	return fmt.Sprintf("%dms", avg)
+	// ICMP 未取得有效結果時，改用 TCP 連線延遲備援
+	if tcpDelay, ok := measureTCPDelay(ctx, cleanIP, port, 3*time.Second); ok {
+		return tcpDelay
+	}
+	return "N/A"
 }
 
 func filterOutAS9808(asnStr string) string {
@@ -180,7 +244,7 @@ func Run(
 
 				delayStr := "未开启"
 				if enablePing {
-					delayStr = measurePingDelay(ctx, target.IP, 3*time.Second)
+					delayStr = measurePingDelay(ctx, target.IP, target.Port, 4*time.Second)
 				}
 
 				hops, err := tr.Trace(ctx, target.IP, target.Port)
